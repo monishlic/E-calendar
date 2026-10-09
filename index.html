@@ -778,6 +778,21 @@ input,select,textarea { font:inherit; color:inherit; }
 .rep-row .name { font-weight:600; }
 .rep-row .num { font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:600; }
 .rep-row .total { font-weight:800; color:var(--pri); }
+/* ---- clean leave report (6 columns) ---- */
+.rep-table-6 .rep-row { grid-template-columns:1.5fr 60px 60px 92px 128px 120px; }
+.rep-summary { margin-bottom:16px; }
+.rep-cycle-line { display:flex; align-items:center; gap:8px; padding:11px 16px; background:var(--pri-soft); color:var(--pri); border-radius:var(--r-md); font-size:13px; font-weight:600; margin-bottom:12px; }
+.rep-chips { display:flex; gap:10px; flex-wrap:wrap; }
+.rep-chip { display:flex; flex-direction:column; gap:2px; padding:8px 14px; background:var(--bg-1); border:1px solid var(--border-1); border-radius:var(--r-md); min-width:118px; }
+.rep-chip .l { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--t-3); }
+.rep-chip .v { font-size:18px; font-weight:800; color:var(--t-1); font-family:'JetBrains Mono',monospace; }
+.rep-chip.danger .v { color:var(--danger); }
+.rep-row .rem { font-family:'JetBrains Mono',monospace; font-size:12.5px; font-weight:700; }
+.rep-over { color:var(--danger); font-weight:800; }
+.rep-left { color:var(--success); font-weight:700; }
+.rep-foot { margin-top:16px; display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }
+.rep-note { font-size:11px; color:var(--t-3); line-height:1.5; max-width:60%; }
+@media (max-width:760px){ .rep-table-6 .rep-row { grid-template-columns:1.3fr 42px 42px 64px 92px 86px; padding:10px 12px; font-size:12px; } .rep-foot { justify-content:center; } .rep-note { max-width:100%; text-align:center; } }
 
 /* ============================================================================
    STAFF
@@ -4289,11 +4304,11 @@ function renderReport(host) {
   host.innerHTML = `
     <div class="page-head">
       <div class="head-left">
-        <h1>Salary Cycle Reports</h1>
-        <div class="desc">Generate leave counts per employee for any salary cycle. Click any staff row for full leave history.</div>
+        <h1>Leave Report</h1>
+        <div class="desc">Leaves taken per staff for the selected month (11th → 10th). Click any staff row for full history.</div>
       </div>
       <div class="head-actions">
-        <button class="btn sec" onclick="openOpeningBalances()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg> Starting Balances</button>
+        <button class="btn sec" onclick="openOpeningBalances()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg> Balances &amp; Quota</button>
         <button class="btn sec" onclick="printView()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg> Print / PDF</button>
       </div>
     </div>
@@ -4305,160 +4320,85 @@ function renderReport(host) {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
         Generate
       </button>
-      <div class="rep-cycle-badge">Start day: ${state.settings.CYCLE_START_DAY || '1'}</div>
+      <div class="rep-cycle-badge">Cycle: ${state.settings.CYCLE_START_DAY || '1'}th → ${((parseInt(state.settings.CYCLE_START_DAY,10)||1) === 1) ? 'month end' : (((parseInt(state.settings.CYCLE_START_DAY,10)||1) - 1) + 'th')}</div>
     </div>
     <div id="rep-body"><div class="empty-slot">Pick a cycle and click <strong>Generate</strong>.</div></div>
-    <div id="salary-report-wrap"></div>
   `;
   document.getElementById('rep-month').addEventListener('change', e => { state.reportMonth = +e.target.value; runReport(); });
   document.getElementById('rep-year').addEventListener('change', e => { state.reportYear = +e.target.value; runReport(); });
   runReport();
 }
 
-/* Compute the cycle report entirely from cached data — no API round-trip.
-   Falls back to fetching missing months in parallel; renders as soon as cache is warm. */
+/* Pull the report straight from the backend, which reads every leave from the
+   sheet — so it's always accurate (no browser-cache gaps) and never under-counts. */
 let _reportRunToken = 0;
 async function runReport() {
   const body = document.getElementById('rep-body');
   const y = state.reportYear, m = state.reportMonth;
-  body.innerHTML = '<div class="empty-slot">Computing…</div>';
-
-  // Ensure the full quota year is loaded so YTD totals + over-quota ↑ are accurate.
-  // Guard against overlapping runs (dropdown changed while a load is in-flight).
+  if (body) body.innerHTML = '<div class="empty-slot">Computing…</div>';
   const token = ++_reportRunToken;
-  await prefetchQuotaYear();
-  if (token !== _reportRunToken) return; // a newer run superseded this one
-
-  // Determine cycle range
-  const { start, end } = getSalaryCycleRange(y, m);
-  const startISO = fmtISO(start), endISO = fmtISO(end);
-
-  // Determine which months the cycle spans and prefetch any missing ones in parallel
-  const monthsInCycle = new Set();
-  const cur = new Date(start.getFullYear(), start.getMonth(), 1);
-  while (cur <= end) {
-    monthsInCycle.add(monthKey(cur.getFullYear(), cur.getMonth() + 1));
-    cur.setMonth(cur.getMonth() + 1);
+  try {
+    const d = await api('report', { year: y, month: m });
+    if (token !== _reportRunToken) return;      // a newer run superseded this one
+    if (!d || !d.ok) throw new Error((d && d.error) || 'Report failed');
+    state.reportData = d;
+    paintReport(d);
+  } catch (e) {
+    if (token !== _reportRunToken) return;
+    if (body) body.innerHTML = '<div class="empty-slot" style="color:var(--danger)">Could not load report: ' + escapeHTML(e.message || String(e)) + '</div>';
   }
-  const missing = [...monthsInCycle].filter(k => !monthCache.has(k));
-  if (missing.length) {
-    const fetches = missing.map(k => {
-      const [yy, mm] = k.split('-').map(Number);
-      return fetchMonth(yy, mm, false);
-    });
-    try { await Promise.all(fetches); } catch (_) { /* per-month toast handled inside fetchMonth */ }
-  }
-
-  // Collect leaves in cycle window (dedup, skip week-off days)
-  const seen = new Set();
-  const inCycle = [];
-  const excluded = [];
-  const collect = (arr) => arr.forEach(l => {
-    if (seen.has(l.id)) return;
-    if (l.date < startISO || l.date > endISO) return;
-    if (l.category === 'OT') return;   // OT (comp) leaves excluded from the cycle leave count
-    seen.add(l.id);
-    if (isNonWorkingISO(l.date)) excluded.push(l);
-    else inCycle.push(l);
-  });
-  monthsInCycle.forEach(k => { const c = monthCache.get(k); if (c) collect(c.leaves); });
-  // Also include the live monthData (in case it isn't cached under its key)
-  if (state.monthData) collect(state.monthData.leaves);
-
-  // Aggregate per staff
-  const totals = {};
-  inCycle.forEach(l => {
-    const key = l.staff;
-    if (!totals[key]) totals[key] = { name: key, fullDays: 0, halfDays: 0, totalDays: 0, leaves: [] };
-    if (l.type === 'Half') { totals[key].halfDays += 1; totals[key].totalDays += 0.5; }
-    else                   { totals[key].fullDays += 1; totals[key].totalDays += 1; }
-    totals[key].leaves.push(l);
-  });
-  // Include active staff who took no leaves this cycle
-  state.staff.filter(s => s.active).forEach(s => {
-    if (!totals[s.name]) totals[s.name] = { name: s.name, fullDays: 0, halfDays: 0, totalDays: 0, leaves: [] };
-  });
-  const rows = Object.values(totals).sort((a, b) => b.totalDays - a.totalDays || a.name.localeCompare(b.name));
-
-  const d = {
-    ok: true,
-    cycleLabel: `${MONTHS[m-1]} ${y}`,
-    startDate: startISO,
-    endDate: endISO,
-    startDay: parseInt(state.settings.CYCLE_START_DAY, 10) || 1,
-    rows,
-    totalLeaves: inCycle.length,
-    weekOffLeavesExcluded: excluded.length
-  };
-  state.reportData = d;
-  paintReport(d);
-  renderSalaryReport();
 }
 
 function paintReport(d) {
   const body = document.getElementById('rep-body');
-  const staffCount = d.rows.length;
-  const totalStaff = d.rows.filter(r => r.totalDays > 0).length;
-  const qStatus = computeQuotaStatus();
-  // Compute over-quota count using total year usage (not just cycle usage)
-  const overQuotaStaff = new Set();
-  qStatus.usage.forEach((used, staffLower) => { if (used > qStatus.quota) overQuotaStaff.add(staffLower); });
-  const overCount = overQuotaStaff.size;
+  if (!body) return;
+  const fmtNum = (n) => Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
+
+  const rowsHtml = d.rows.map(r => {
+    const over = r.over > 0;
+    const remCell = over
+      ? `<span class="rep-over">OVER by ${fmtNum(r.over)}</span>`
+      : `<span class="rep-left">${fmtNum(r.remaining)} left</span>`;
+    const overMark = over ? ' <span class="over-quota-mark" title="Exceeds quota">↑</span>' : '';
+    return `
+      <div class="rep-row clickable" onclick="showStaffDeepDive('${escapeAttr(r.name)}')">
+        <div class="name" style="display:flex;align-items:center;gap:10px">
+          <div class="staff-avatar" style="width:28px;height:28px;font-size:10.5px" data-c="${nameColorIndex(r.name)}">${initials(r.name)}</div>
+          <span>${escapeHTML(r.name)}${overMark}</span>
+        </div>
+        <div class="num" style="text-align:right;color:${r.cycleFull?'var(--rose-500)':'var(--t-4)'}">${r.cycleFull}</div>
+        <div class="num" style="text-align:right;color:${r.cycleHalf?'var(--amber-500)':'var(--t-4)'}">${r.cycleHalf}</div>
+        <div class="total" style="text-align:right">${fmtNum(r.cycleTotal)}</div>
+        <div class="num" style="text-align:right;color:var(--t-2)">${fmtNum(r.ytd)} / ${fmtNum(r.quota)}</div>
+        <div class="num rem" style="text-align:right">${remCell}</div>
+      </div>`;
+  }).join('');
+
   body.innerHTML = `
-    <div style="margin-bottom:16px;padding:12px 16px;background:var(--pri-soft);color:var(--pri);border-radius:var(--r-md);font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-      ${d.cycleLabel} · ${formatDateDMY(d.startDate)} → ${formatDateDMY(d.endDate)}
-    </div>
-    <div class="stat-grid">
-      <div class="stat-card" style="--sc:var(--indigo-500)">
-        <div class="icon-holder" style="background:var(--indigo-50);color:var(--indigo-600)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 11H5a2 2 0 00-2 2v7h18v-7a2 2 0 00-2-2h-4M12 3v13M8 7l4-4 4 4"/></svg></div>
-        <div class="label">Total Leaves</div>
-        <div class="val">${d.totalLeaves}</div>
-        <div class="sub">In this cycle</div>
+    <div class="rep-summary">
+      <div class="rep-cycle-line">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+        <strong>${escapeHTML(d.cycleLabel)}</strong> · ${formatDateDMY(d.startDate)} → ${formatDateDMY(d.endDate)}
       </div>
-      <div class="stat-card" style="--sc:var(--rose-500)">
-        <div class="icon-holder" style="background:var(--rose-50);color:var(--rose-600)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="7" r="4"/><path d="M5 21v-2a4 4 0 014-4h6a4 4 0 014 4v2"/></svg></div>
-        <div class="label">Staff On Leave</div>
-        <div class="val">${totalStaff}</div>
-        <div class="sub">Out of ${staffCount}</div>
-      </div>
-      <div class="stat-card" style="--sc:var(--emerald-500)">
-        <div class="icon-holder" style="background:var(--emerald-50);color:var(--emerald-600)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg></div>
-        <div class="label">Total Staff</div>
-        <div class="val">${staffCount}</div>
-        <div class="sub">All active</div>
-      </div>
-      <div class="stat-card warn" style="--sc:var(--danger)">
-        <div class="icon-holder" style="background:var(--danger-soft);color:var(--danger)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2L2 22h20L12 2z"/><path d="M12 9v6M12 18h.01"/></svg></div>
-        <div class="label">Over Quota</div>
-        <div class="val" style="${overCount?'color:var(--danger)':''}">${overCount}${overCount ? ' <span class="over-quota-mark" style="font-size:0.85em">↑</span>' : ''}</div>
-        <div class="sub">Annual quota: ${qStatus.quota} days</div>
+      <div class="rep-chips">
+        <div class="rep-chip"><span class="l">On Leave</span><span class="v">${d.staffOnLeave}/${d.totalStaff}</span></div>
+        <div class="rep-chip"><span class="l">Leaves This Cycle</span><span class="v">${fmtNum(d.totalLeavesCycle)}</span></div>
+        <div class="rep-chip ${d.overCount?'danger':''}"><span class="l">Over Quota</span><span class="v">${d.overCount}</span></div>
       </div>
     </div>
-    <div class="rep-table">
+    <div class="rep-table rep-table-6">
       <div class="rep-row head">
         <div>Staff</div>
         <div class="num" style="text-align:right">Full</div>
         <div class="num" style="text-align:right">Half</div>
-        <div class="total" style="text-align:right">Total</div>
+        <div class="total" style="text-align:right">This Cycle</div>
+        <div class="num" style="text-align:right">Year (used/quota)</div>
+        <div class="num" style="text-align:right">Remaining</div>
       </div>
-      ${d.rows.map(r => {
-        const yearUsed = qStatus.usage.get(r.name.toLowerCase()) || 0;
-        const isOverAnnual = yearUsed > qStatus.quota;
-        const overMark = isOverAnnual ? '<span class="over-quota-mark" title="Exceeds annual quota">↑</span>' : '';
-        return `
-        <div class="rep-row clickable" onclick="showStaffDeepDive('${escapeAttr(r.name)}')">
-          <div class="name" style="display:flex;align-items:center;gap:10px">
-            <div class="staff-avatar" style="width:28px;height:28px;font-size:10.5px" data-c="${nameColorIndex(r.name)}">${initials(r.name)}</div>
-            <span>${escapeHTML(r.name)}${overMark}</span>
-          </div>
-          <div class="num" style="text-align:right;color:${r.fullDays?'var(--rose-500)':'var(--t-4)'}">${r.fullDays}</div>
-          <div class="num" style="text-align:right;color:${r.halfDays?'var(--amber-500)':'var(--t-4)'}">${r.halfDays}</div>
-          <div class="total ${isOverAnnual?'over-quota':''}" style="text-align:right">${r.totalDays}${isOverAnnual?' <span class="over-quota-mark">↑</span>':''}</div>
-        </div>`;
-      }).join('')}
+      ${rowsHtml || '<div class="empty-slot">No active staff.</div>'}
     </div>
-    <div style="margin-top:18px;display:flex;justify-content:center">
+    <div class="rep-foot">
+      <div class="rep-note">Leave year: ${formatDateDMY(d.quotaYearStart)} → ${formatDateDMY(d.quotaYearEnd)}. Sundays &amp; office-closed days are excluded; comp-off (OT) leaves don't count.</div>
       <button class="btn sec" onclick="exportReportCSV()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
         Download CSV
@@ -4495,19 +4435,26 @@ function openOpeningBalances() {
           <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" width="18" height="18"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
         </div>
         <div>
-          <h3>Starting Balances</h3>
-          <div class="m-sub">Leaves each staff has already taken this year (before the tool)</div>
+          <h3>Balances &amp; Quota</h3>
+          <div class="m-sub">Leaves already taken this year + each staff's yearly allowance</div>
         </div>
         <button class="mod-close" onclick="this.closest('.mod-ov').remove()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
       </div>
       <div class="mod-body">
         <div style="font-size:12px;color:var(--t-2);line-height:1.55;margin-bottom:12px">
-          Enter total leave days taken so far this quota year. Decimals allowed (e.g. <strong>14.75</strong>, <strong>2.5</strong>). These add to any leaves recorded in the tool and drive the over-quota ↑ and salary deduction.
+          <strong>Taken this year</strong> = leaves already used before the tool started tracking (decimals OK, e.g. 14.75). <strong>Quota</strong> = that staff's yearly paid-leave allowance — leave it blank to use the office default of <strong>${escapeHTML(String(state.settings.ANNUAL_LEAVE_QUOTA || 12))}</strong>, or set a custom number for mid-year joiners.
         </div>
         <div class="field" style="margin-bottom:12px">
-          <label class="field-label">These totals are as of</label>
+          <label class="field-label">"Taken this year" totals are as of</label>
           <input class="field-input" type="date" id="ob-asof" value="${escapeAttr(openingAsOfISO())}"/>
-          <div style="font-size:11px;color:var(--t-3);margin-top:4px">The excess is charged in the salary cycle that contains this date; later cycles treat it as already settled.</div>
+          <div style="font-size:11px;color:var(--t-3);margin-top:4px">The date these starting counts were accurate through.</div>
+        </div>
+        <div class="ob-row" style="border-bottom:2px solid var(--border-1);padding-bottom:7px">
+          <div class="ob-name" style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--t-3)">Staff</div>
+          <div style="display:flex;gap:8px">
+            <div style="width:92px;text-align:center;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--t-3)">Taken this yr</div>
+            <div style="width:84px;text-align:center;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--t-3)">Quota</div>
+          </div>
         </div>
         <div class="ob-list">
           ${active.map(s => `
@@ -4516,7 +4463,10 @@ function openOpeningBalances() {
                 <span class="staff-avatar" style="width:26px;height:26px;font-size:10px;background:${STAFF_GRADIENT[nameColorIndex(s.name)]}">${initials(s.name)}</span>
                 ${escapeHTML(s.name)}
               </div>
-              <input class="field-input ob-input" type="number" step="0.25" min="0" value="${parseFloat(s.openingBalance) || 0}" data-name="${escapeAttr(s.name)}" style="width:110px;text-align:right"/>
+              <div style="display:flex;gap:8px">
+                <input class="field-input ob-input" type="number" step="0.25" min="0" value="${parseFloat(s.openingBalance) || 0}" data-name="${escapeAttr(s.name)}" style="width:92px;text-align:right"/>
+                <input class="field-input obq-input" type="number" step="0.25" min="0" placeholder="${escapeAttr(String(state.settings.ANNUAL_LEAVE_QUOTA || 12))}" value="${(s.quota===null||s.quota===undefined||s.quota==='')?'':s.quota}" data-name="${escapeAttr(s.name)}" style="width:84px;text-align:right" title="Blank = office default"/>
+              </div>
             </div>
           `).join('') || '<div class="empty-slot">No active staff.</div>'}
         </div>
@@ -4533,33 +4483,36 @@ function openOpeningBalances() {
 }
 
 async function saveOpeningBalances() {
-  const rows = Array.from(document.querySelectorAll('#opening-modal .ob-input'));
+  const obInputs = Array.from(document.querySelectorAll('#opening-modal .ob-input'));
+  const qInputs  = Array.from(document.querySelectorAll('#opening-modal .obq-input'));
   const btn = document.getElementById('ob-save');
   const msg = document.getElementById('ob-msg');
   const asOf = document.getElementById('ob-asof')?.value || openingAsOfISO();
-  const balances = rows.map(inp => ({ name: inp.dataset.name, value: parseFloat(inp.value) || 0 }));
+  const balances = obInputs.map(inp => ({ name: inp.dataset.name, value: parseFloat(inp.value) || 0 }));
+  const quotas   = qInputs.map(inp => ({ name: inp.dataset.name, value: (inp.value || '').trim() }));  // '' = office default
   btn.disabled = true; btn.style.opacity = '0.6'; btn.textContent = 'Saving…';
   // Optimistic: update local state so the report reflects it instantly
-  const prev = {};
-  balances.forEach(b => {
-    const s = state.staff.find(x => x.name === b.name);
-    if (s) { prev[b.name] = s.openingBalance; s.openingBalance = b.value; }
-  });
+  const prevOpen = {}, prevQuota = {};
+  balances.forEach(b => { const s = state.staff.find(x => x.name === b.name); if (s) { prevOpen[b.name] = s.openingBalance; s.openingBalance = b.value; } });
+  quotas.forEach(q => { const s = state.staff.find(x => x.name === q.name); if (s) { prevQuota[q.name] = s.quota; s.quota = (q.value === '' ? null : (parseFloat(q.value) || 0)); } });
   const prevAsOf = state.settings.OPENING_BALANCE_ASOF;
   state.settings.OPENING_BALANCE_ASOF = asOf;
   invalidateQuota();
   try {
     const r = await api('setopenings', {}, { balances });
     if (!r.ok) throw new Error(r.error || 'Save failed');
+    const rq = await api('setquotas', {}, { quotas });
+    if (!rq.ok) throw new Error(rq.error || 'Quota save failed');
     await api('updatesetting', { key: 'OPENING_BALANCE_ASOF', value: asOf });
     document.getElementById('opening-modal')?.remove();
-    showToast(`Starting balances saved (${r.updated || balances.length} staff)`, 'ok');
+    showToast('Balances & quota saved', 'ok');
     if (state.view === 'report') runReport();
     else if (state.view === 'calendar') paintCalendarBody();
   } catch (err) {
     state.settings.OPENING_BALANCE_ASOF = prevAsOf;
     // Rollback
-    balances.forEach(b => { const s = state.staff.find(x => x.name === b.name); if (s && prev[b.name] !== undefined) s.openingBalance = prev[b.name]; });
+    balances.forEach(b => { const s = state.staff.find(x => x.name === b.name); if (s && prevOpen[b.name] !== undefined) s.openingBalance = prevOpen[b.name]; });
+    quotas.forEach(q => { const s = state.staff.find(x => x.name === q.name); if (s && prevQuota[q.name] !== undefined) s.quota = prevQuota[q.name]; });
     invalidateQuota();
     if (msg) { msg.textContent = 'Save failed: ' + (err.message || err); msg.style.color = 'var(--danger)'; }
     btn.disabled = false; btn.style.opacity = '1'; btn.textContent = 'Save Balances';
@@ -4808,12 +4761,18 @@ function printSalaryReport() {
 
 function exportReportCSV() {
   const d = state.reportData; if (!d) return;
-  const rows = [['Staff','Full Days','Half Days','Total Days'], ...d.rows.map(r => [r.name, r.fullDays, r.halfDays, r.totalDays])];
+  const header = ['Staff','Full','Half','This Cycle','Year Used','Quota','Remaining','Status'];
+  const body = d.rows.map(r => [
+    r.name, r.cycleFull, r.cycleHalf, r.cycleTotal, r.ytd, r.quota,
+    (r.over > 0 ? -r.over : r.remaining),
+    (r.over > 0 ? ('OVER by ' + r.over) : 'Within quota')
+  ]);
+  const rows = [header, ...body];
   const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `leave-report-${d.cycleLabel.replace(/ /g,'-')}.csv`;
+  a.download = `E-Calendar-leave-report-${d.cycleLabel.replace(/ /g,'-')}.csv`;
   a.click();
 }
 
