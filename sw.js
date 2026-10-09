@@ -7,7 +7,7 @@
    >>> To push an update to everyone after you change index.html on GitHub:
    >>> bump the version number below (ecal-v1 -> ecal-v2). That's it.
    ============================================================================ */
-const CACHE = 'ecal-v2';
+const CACHE = 'ecal-v3';
 
 const SHELL = [
   './',

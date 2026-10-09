@@ -969,6 +969,17 @@ input,select,textarea { font:inherit; color:inherit; }
 .mod-stat.full .mv { color:var(--rose-500); }
 .mod-stat.half .mv { color:var(--amber-500); }
 .mod-stat.tot .mv { color:var(--pri); }
+/* ---- staff popup: month scroller + year total ---- */
+.dd-scroller { display:flex; align-items:center; gap:10px; background:var(--bg-2); border:1px solid var(--border-1); border-radius:var(--r-md); padding:6px 8px; margin-bottom:10px; }
+.dd-arrow { width:34px; height:34px; border-radius:8px; border:1px solid var(--border-1); background:var(--bg-1); color:var(--t-1); font-size:22px; line-height:1; cursor:pointer; display:grid; place-items:center; transition:all var(--dur-fast) var(--ease-out); flex:none; }
+.dd-arrow:hover { background:var(--pri); color:#fff; border-color:transparent; }
+.dd-scroller-mid { flex:1; text-align:center; }
+.dd-cyc-lbl { font-size:14px; font-weight:800; color:var(--t-1); }
+.dd-cyc-sub { font-size:11px; color:var(--t-3); font-weight:600; margin-top:1px; }
+.dd-yeartotal { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 14px; border-radius:var(--r-md); background:var(--bg-2); border:1px solid var(--border-1); margin-bottom:16px; }
+.dd-yeartotal .l { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--t-3); }
+.dd-yeartotal .v { font-size:14px; font-weight:800; color:var(--t-1); font-family:'JetBrains Mono',monospace; }
+.dd-yeartotal.over .v { color:var(--danger); }
 .mod-list-title { font-size:10.5px; font-weight:700; color:var(--t-3); text-transform:uppercase; letter-spacing:0.08em; margin:6px 0 10px; }
 .mod-leave {
   display:grid; grid-template-columns:1fr 70px auto;
@@ -3442,8 +3453,12 @@ function computeStaffDetailFromCache(name, year) {
   return { ok:true, name, year, leaves, fullDays, halfDays, recordedDays, opening, totalDays, monthly, topDow, topDowCount };
 }
 
-async function showStaffDeepDive(name) {
+let _dd = { name:'', year:0, month:0 };
+async function showStaffDeepDive(name, repYear, repMonth) {
   if (!name) return;
+  _dd.name = name;
+  _dd.year  = repYear  || state.reportYear  || state.today.getFullYear();
+  _dd.month = repMonth || state.reportMonth || (state.today.getMonth() + 1);
   const av = document.getElementById('mod-avatar');
   av.textContent = initials(name);
   av.style.background = STAFF_GRADIENT[nameColorIndex(name)];
@@ -3472,9 +3487,8 @@ async function showStaffDeepDive(name) {
     const monthlyMax = Math.max(1, ...Object.values(d.monthly).map(m => m.total));
     const qStatus = computeQuotaStatus();
     const isOver = d.totalDays > qStatus.quota;
-    const quotaBadge = isOver
-      ? `<span class="pill lo" style="margin-left:8px">${d.totalDays}/${qStatus.quota} <span class="over-quota-mark">↑</span> Over by ${(d.totalDays - qStatus.quota).toFixed(2).replace(/\.00$/, '')}</span>`
-      : `<span class="pill hi" style="margin-left:8px">${d.totalDays}/${qStatus.quota} used</span>`;
+    const yrOverAmt = (d.totalDays - qStatus.quota).toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+    const yrLeft = (qStatus.quota - d.totalDays).toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
 
     const barHTML = (mnStart) => MONTHS.slice(mnStart, mnStart+6).map((mn, i) => {
       const mIdx = mnStart + i;
@@ -3491,11 +3505,20 @@ async function showStaffDeepDive(name) {
     }).join('');
 
     document.getElementById('mod-body').innerHTML = `
-      <div style="margin-bottom:12px">${quotaBadge}</div>
-      <div class="mod-stats">
-        <div class="mod-stat full"><div class="mv">${d.fullDays}</div><div class="ml">Full Days</div></div>
-        <div class="mod-stat half"><div class="mv">${d.halfDays}</div><div class="ml">Half Days</div></div>
-        <div class="mod-stat tot"><div class="mv" style="${isOver?'color:var(--danger)':''}">${d.totalDays}${isOver?' <span class="over-quota-mark">↑</span>':''}</div><div class="ml">Total ${d.year}</div></div>
+      <div class="dd-scroller">
+        <button class="dd-arrow" onclick="ddShiftCycle(-1)" title="Previous month">‹</button>
+        <div class="dd-scroller-mid">
+          <div id="dd-cycle-label" class="dd-cyc-lbl">—</div>
+          <div id="dd-cycle-sub" class="dd-cyc-sub"></div>
+        </div>
+        <button class="dd-arrow" onclick="ddShiftCycle(1)" title="Next month">›</button>
+      </div>
+      <div class="mod-stats" id="dd-cycle-cards">
+        <div class="empty-slot" style="grid-column:1/-1">Loading…</div>
+      </div>
+      <div class="dd-yeartotal ${isOver?'over':''}">
+        <span class="l">Year Total ${d.year}</span>
+        <span class="v">${d.totalDays} / ${qStatus.quota}${isOver ? ` · <span class="over-quota-mark">↑</span> Over by ${yrOverAmt}` : ` · ${yrLeft} left`}</span>
       </div>
       <div class="dd-opening-box">
         <div>
@@ -3535,10 +3558,46 @@ async function showStaffDeepDive(name) {
         </div>`;
       }).join('') : '<div class="empty-slot">No leaves this year yet.</div>'}
     `;
+    loadDeepDiveCycle();   // fill the month cards for the selected cycle
   } catch (err) {
     document.getElementById('mod-body').innerHTML = `<div class="empty-slot" style="color:var(--danger)">${err.message}</div>`;
   }
 }
+
+/* Fill the staff popup's month cards (Full / Half / This Month) for the selected
+   cycle — pulled from the SAME backend report as the table, so the numbers always match. */
+async function loadDeepDiveCycle() {
+  const cont = document.getElementById('dd-cycle-cards');
+  if (!cont) return;
+  const lbl = document.getElementById('dd-cycle-label');
+  const sub = document.getElementById('dd-cycle-sub');
+  if (lbl) lbl.textContent = `${MONTHS[_dd.month - 1]} ${_dd.year}`;
+  cont.innerHTML = '<div class="empty-slot" style="grid-column:1/-1">Loading…</div>';
+  const fmtN = (n) => Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
+  try {
+    const wantLabel = `${MONTHS[_dd.month - 1]} ${_dd.year}`;
+    let r = (state.reportData && state.reportData.cycleLabel === wantLabel) ? state.reportData : null;
+    if (!r) r = await api('report', { year: _dd.year, month: _dd.month });
+    if (!r || !r.ok) throw new Error('Could not load that month');
+    if (sub) sub.textContent = `${formatDateDMY(r.startDate)} → ${formatDateDMY(r.endDate)}`;
+    const row = (r.rows || []).find(x => String(x.name).toLowerCase() === _dd.name.toLowerCase()) || { cycleFull: 0, cycleHalf: 0, cycleTotal: 0 };
+    cont.innerHTML = `
+      <div class="mod-stat full"><div class="mv">${row.cycleFull}</div><div class="ml">Full Days</div></div>
+      <div class="mod-stat half"><div class="mv">${row.cycleHalf}</div><div class="ml">Half Days</div></div>
+      <div class="mod-stat tot"><div class="mv">${fmtN(row.cycleTotal)}</div><div class="ml">This Month</div></div>
+    `;
+  } catch (e) {
+    cont.innerHTML = `<div class="empty-slot" style="grid-column:1/-1;color:var(--danger)">${escapeHTML(e.message || String(e))}</div>`;
+  }
+}
+function ddShiftCycle(delta) {
+  let m = _dd.month + delta, y = _dd.year;
+  if (m < 1) { m = 12; y--; }
+  if (m > 12) { m = 1; y++; }
+  _dd.month = m; _dd.year = y;
+  loadDeepDiveCycle();
+}
+window.ddShiftCycle = ddShiftCycle;
 function calcCurrentStreak(leaves, today) {
   if (!leaves.length) return 999;
   const sortedDesc = leaves.slice().sort((a,b) => b.date.localeCompare(a.date));
